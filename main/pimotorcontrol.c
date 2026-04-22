@@ -134,7 +134,8 @@ static void pmc_task(void *arg)
 	uint8_t *data_w = malloc(len); // angular velocity magnitude
 	uint8_t *velSigns = malloc(len); // velocity signs
 	uint32_t pmcTaskValue=0; // initialize a store of information from ESPNOW
-							 //
+	*data_v = 0;
+	*data_w = 0;
 	// Initialize LED to zero
 	led_strip_pixels[0]=255; //G
 	led_strip_pixels[1]=0; //R
@@ -260,28 +261,37 @@ static void pmc_task(void *arg)
 		} 
 		xTaskNotifyAndQuery(xTaskGetCurrentTaskHandle() ,0x00,eNoAction,&pmcTaskValue);
 		if (pmcTaskValue & 1 ) {
-			motor_running = true; // run under CA control
+			motor_running = false; // run under CA control
 		} else {
+				led_strip_pixels[0]=0;
+				led_strip_pixels[1]=0;
+				led_strip_pixels[2]=0;
 			motor_running = false; // We'll give the command
 			if (( (pmcTaskValue >> 1) & 1) ) { // Right / Left ?
-				*(data_v) = 0;
-				*(data_w) = 255;
+				led_strip_pixels[0]=255;
+				*(data_v) = 00;
+				*(data_w) = 200;
 				*(velSigns) = 0;
 			} else if (( (pmcTaskValue >> 2) & 1) ) { // Forward
+				led_strip_pixels[1]=255;
 				*(data_v) = 255;
 				*(data_w) = 0;
-				*(velSigns) = 1;
+				*(velSigns) = 2;
 			} else if (( (pmcTaskValue >> 3) & 1) ) { // Right / Left?
+				led_strip_pixels[2]=255;
 				*(data_v) = 0;
-				*(data_w) = 255;
+				*(data_w) = 200;
 				*(velSigns) = 1;
-			} else { // stop
+			}   else { // stop */
 				*(data_v) = 0;
 				*(data_w) = 0;
 				*(velSigns) = 0;
 			}
 			xTimerReset(watchdog_timer, 0);
 			is_stopped = false;
+			// Update LEDs 
+			ESP_ERROR_CHECK(rmt_transmit(led_chan, led_encoder, led_strip_pixels, sizeof(led_strip_pixels), &tx_config));
+			ESP_ERROR_CHECK(rmt_tx_wait_all_done(led_chan, portMAX_DELAY));
 		}
 		xTaskNotify(xTaskGetHandle("CONTROL_task"),(*(data_w) << 8) | (*(data_v) << 16) | *velSigns,eSetValueWithOverwrite);
 		vTaskDelay(5 / portTICK_PERIOD_MS);

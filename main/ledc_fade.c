@@ -13,6 +13,8 @@
 #include "driver/ledc.h"
 #include "driver/gpio.h"
 #include "esp_err.h"
+#include "freertos/queue.h"
+#include "control_loop.h"
 
 /* PLAN: recreate gpio task loop here, using fade functions instead of gpio_set functions */
 /* #include "ledc_fade.h" */
@@ -66,8 +68,8 @@
 #define LEDC_TEST_DUTY         (1000)
 #define LEDC_TEST_FADE_TIME    (15)
 
-#define DEADZONE_MIN    (200)
-#define DEADZONE_MAX    (700)
+#define DEADZONE_MIN    (500)
+#define DEADZONE_MAX    (750)
 
 #define GPIO_OUTPUT_IO_3     GPIO_NUM_39 // Sleep
 #define GPIO_OUTPUT_IO_6     GPIO_NUM_35 // LED
@@ -212,35 +214,43 @@ void ledc_task(void)
     // Initialize fade service.
     ledc_fade_func_install(0);
 	uint32_t ledcTaskValue;
-	uint16_t left_wheel_PWM;
-	uint16_t right_wheel_PWM;
+	wheel_command_t cmd = {.left = 0, .right = 0};
+
     while (1) {
-		xTaskNotifyAndQuery(xTaskGetCurrentTaskHandle() ,0x00,eNoAction,&ledcTaskValue);
-		// Expecting to have the 24-17th bit as left wheel, 16-9th as right wheel, and 8th-1st bit as mode or sign information
-		// You could make the code far more compact by changing the channel index using the sign bit
-		// You need a time out condition to stop motors
-		// Note that there is some deadzone compensation here
-		
-		
-		// apply a deadzone to extracted wheel speeds
-		left_wheel_PWM = apply_deadzone( (ledcTaskValue >> 16) & 255,DEADZONE_MIN,DEADZONE_MAX);
-		right_wheel_PWM = apply_deadzone( (ledcTaskValue >> 8) & 255,DEADZONE_MIN,DEADZONE_MAX);
-		gpio_set_level(GPIO_OUTPUT_IO_3, 1); // Sleep
-		// Set Bin 2
-		ledc_set_duty(ledc_channel[1-(ledcTaskValue & 1)].speed_mode, ledc_channel[1-(ledcTaskValue & 1)].channel, 0);
-		ledc_update_duty(ledc_channel[1-(ledcTaskValue & 1)].speed_mode, ledc_channel[1-(ledcTaskValue & 1)].channel);
-		// Set Bin 1
-		ledc_set_fade_with_time(ledc_channel[ledcTaskValue & 1].speed_mode, ledc_channel[ledcTaskValue & 1].channel,left_wheel_PWM, LEDC_TEST_FADE_TIME);
-		ledc_fade_start(ledc_channel[ledcTaskValue & 1].speed_mode, ledc_channel[ledcTaskValue & 1].channel, LEDC_FADE_NO_WAIT);
+        // Block until control_task sends a new command (up to 20ms)
+        xQueueReceive(wheel_cmd_queue, &cmd, pdMS_TO_TICKS(20));
 
-		// Set Ain 2
-		ledc_set_duty(ledc_channel[3-((ledcTaskValue >> 1) & 1)].speed_mode, ledc_channel[3-((ledcTaskValue >> 1) & 1)].channel, 0);
-		ledc_update_duty(ledc_channel[3-((ledcTaskValue >> 1) & 1)].speed_mode, ledc_channel[3-((ledcTaskValue >> 1) & 1)].channel);
-		// Set Ain 1
-		ledc_set_fade_with_time(ledc_channel[2+((ledcTaskValue >> 1) & 1)].speed_mode, ledc_channel[2+((ledcTaskValue >> 1) & 1)].channel,right_wheel_PWM, LEDC_TEST_FADE_TIME);
-		ledc_fade_start(ledc_channel[2+((ledcTaskValue >> 1) & 1)].speed_mode, ledc_channel[2+((ledcTaskValue >> 1) & 1)].channel, LEDC_FADE_NO_WAIT);
+        // Extract magnitude and sign from signed values
+        uint8_t left_mag  = cmd.left  < 0 ? -cmd.left  : cmd.left;
+        uint8_t right_mag = cmd.right < 0 ? -cmd.right : cmd.right;
+        bool    left_fwd  = cmd.left  >= 0;
+        bool    right_fwd = cmd.right >= 0;
 
-		vTaskDelay(10/ portTICK_PERIOD_MS);
+        uint16_t left_pwm  = apply_deadzone(left_mag,  DEADZONE_MIN, DEADZONE_MAX);
+        uint16_t right_pwm = apply_deadzone(right_mag, DEADZONE_MIN, DEADZONE_MAX);
 
+        gpio_set_level(GPIO_OUTPUT_IO_3, (left_pwm > 0 || right_pwm > 0) ? 1 : 0);
+
+        // Left wheel: channels 0/1
+        ledc_set_duty(ledc_channel[left_fwd ? 0 : 1].speed_mode,
+                      ledc_channel[left_fwd ? 0 : 1].channel, 0);
+        ledc_update_duty(ledc_channel[left_fwd ? 0 : 1].speed_mode,
+                         ledc_channel[left_fwd ? 0 : 1].channel);
+        ledc_set_fade_with_time(ledc_channel[left_fwd ? 1 : 0].speed_mode,
+                                ledc_channel[left_fwd ? 1 : 0].channel,
+                                left_pwm, LEDC_TEST_FADE_TIME);
+        ledc_fade_start(ledc_channel[left_fwd ? 1 : 0].speed_mode,
+                        ledc_channel[left_fwd ? 1 : 0].channel, LEDC_FADE_NO_WAIT);
+
+        // Right wheel: channels 2/3
+        ledc_set_duty(ledc_channel[right_fwd ? 2 : 3].speed_mode,
+                      ledc_channel[right_fwd ? 2 : 3].channel, 0);
+        ledc_update_duty(ledc_channel[right_fwd ? 2 : 3].speed_mode,
+                         ledc_channel[right_fwd ? 2 : 3].channel);
+        ledc_set_fade_with_time(ledc_channel[right_fwd ? 3 : 2].speed_mode,
+                                ledc_channel[right_fwd ? 3 : 2].channel,
+                                right_pwm, LEDC_TEST_FADE_TIME);
+        ledc_fade_start(ledc_channel[right_fwd ? 3 : 2].speed_mode,
+                        ledc_channel[right_fwd ? 3 : 2].channel, LEDC_FADE_NO_WAIT);
     }
 }
