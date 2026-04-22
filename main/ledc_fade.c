@@ -64,8 +64,10 @@
 
 #define LEDC_TEST_CH_NUM       (4)
 #define LEDC_TEST_DUTY         (1000)
-#define LEDC_TEST_FADE_TIME    (100)
+#define LEDC_TEST_FADE_TIME    (15)
 
+#define DEADZONE_MIN    (200)
+#define DEADZONE_MAX    (700)
 
 #define GPIO_OUTPUT_IO_3     GPIO_NUM_39 // Sleep
 #define GPIO_OUTPUT_IO_6     GPIO_NUM_35 // LED
@@ -75,16 +77,11 @@
  * Use callback only if you are aware it is being called inside an ISR
  * Otherwise, you can use a semaphore to unblock tasks
  */
-static IRAM_ATTR bool cb_ledc_fade_end_event(const ledc_cb_param_t *param, void *user_arg)
-{
-    BaseType_t taskAwoken = pdFALSE;
-
-    if (param->event == LEDC_FADE_END_EVT) {
-        SemaphoreHandle_t counting_sem = (SemaphoreHandle_t) user_arg;
-        xSemaphoreGiveFromISR(counting_sem, &taskAwoken);
-    }
-
-    return (taskAwoken == pdTRUE);
+uint16_t apply_deadzone(uint8_t raw, uint16_t dz_min, uint16_t dz_max) {
+	// Unused as of 4/22/26
+    if (raw == 0) return 0;  // true stop
+    // Map [1,255] → [dz_min, dz_max] linearly
+    return dz_min + ((uint32_t)raw * (dz_max - dz_min)) / 255;
 }
 
 void ledc_task(void)
@@ -214,16 +211,9 @@ void ledc_task(void)
 
     // Initialize fade service.
     ledc_fade_func_install(0);
-    ledc_cbs_t callbacks = {
-        .fade_cb = cb_ledc_fade_end_event
-    };
-	// Create a counting semaphore
-    SemaphoreHandle_t counting_sem = xSemaphoreCreateCounting(LEDC_TEST_CH_NUM, 0);
-	// Send that semaphore to the callback for each channel
-    for (ch = 0; ch < LEDC_TEST_CH_NUM; ch++) {
-        ledc_cb_register(ledc_channel[ch].speed_mode, ledc_channel[ch].channel, &callbacks, (void *) counting_sem);
-    }
 	uint32_t ledcTaskValue;
+	uint16_t left_wheel_PWM;
+	uint16_t right_wheel_PWM;
     while (1) {
 		xTaskNotifyAndQuery(xTaskGetCurrentTaskHandle() ,0x00,eNoAction,&ledcTaskValue);
 		// Expecting to have the 24-17th bit as left wheel, 16-9th as right wheel, and 8th-1st bit as mode or sign information
@@ -231,24 +221,26 @@ void ledc_task(void)
 		// You need a time out condition to stop motors
 		// Note that there is some deadzone compensation here
 		
+		
+		// apply a deadzone to extracted wheel speeds
+		left_wheel_PWM = apply_deadzone( (ledcTaskValue >> 16) & 255,DEADZONE_MIN,DEADZONE_MAX);
+		right_wheel_PWM = apply_deadzone( (ledcTaskValue >> 8) & 255,DEADZONE_MIN,DEADZONE_MAX);
 		gpio_set_level(GPIO_OUTPUT_IO_3, 1); // Sleep
 		// Set Bin 2
 		ledc_set_duty(ledc_channel[1-(ledcTaskValue & 1)].speed_mode, ledc_channel[1-(ledcTaskValue & 1)].channel, 0);
 		ledc_update_duty(ledc_channel[1-(ledcTaskValue & 1)].speed_mode, ledc_channel[1-(ledcTaskValue & 1)].channel);
 		// Set Bin 1
-		ledc_set_fade_with_time(ledc_channel[ledcTaskValue & 1].speed_mode, ledc_channel[ledcTaskValue & 1].channel,( (ledcTaskValue >> 16) & 255)+500, LEDC_TEST_FADE_TIME);
+		ledc_set_fade_with_time(ledc_channel[ledcTaskValue & 1].speed_mode, ledc_channel[ledcTaskValue & 1].channel,left_wheel_PWM, LEDC_TEST_FADE_TIME);
 		ledc_fade_start(ledc_channel[ledcTaskValue & 1].speed_mode, ledc_channel[ledcTaskValue & 1].channel, LEDC_FADE_NO_WAIT);
 
 		// Set Ain 2
 		ledc_set_duty(ledc_channel[3-((ledcTaskValue >> 1) & 1)].speed_mode, ledc_channel[3-((ledcTaskValue >> 1) & 1)].channel, 0);
 		ledc_update_duty(ledc_channel[3-((ledcTaskValue >> 1) & 1)].speed_mode, ledc_channel[3-((ledcTaskValue >> 1) & 1)].channel);
 		// Set Ain 1
-		ledc_set_fade_with_time(ledc_channel[2+((ledcTaskValue >> 1) & 1)].speed_mode, ledc_channel[2+((ledcTaskValue >> 1) & 1)].channel,( (ledcTaskValue >> 8) & 255)+500, LEDC_TEST_FADE_TIME);
+		ledc_set_fade_with_time(ledc_channel[2+((ledcTaskValue >> 1) & 1)].speed_mode, ledc_channel[2+((ledcTaskValue >> 1) & 1)].channel,right_wheel_PWM, LEDC_TEST_FADE_TIME);
 		ledc_fade_start(ledc_channel[2+((ledcTaskValue >> 1) & 1)].speed_mode, ledc_channel[2+((ledcTaskValue >> 1) & 1)].channel, LEDC_FADE_NO_WAIT);
 
-        for (int i = 0; i < 2; i++) {
-            xSemaphoreTake(counting_sem, portMAX_DELAY);
-        }
+		vTaskDelay(10/ portTICK_PERIOD_MS);
 
     }
 }

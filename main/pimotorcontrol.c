@@ -25,9 +25,11 @@
 // My code
 #include "my_espnow.h"
 #include "ledc_fade.h"
+#include "control_loop.h"
 #include "pimotorcontrol.h"
 
 #define PMC_TASK_STACK_SIZE (4096)
+#define CONTROL_TASK_STACK_SIZE (1024)
 
 // USB config
 #define BUF_SIZE (1024)
@@ -48,6 +50,7 @@ static const char *TAG = "espnow_example";
 #define RMT_TASK_STACK_SIZE (2048)
 static uint8_t led_strip_pixels[3];
 
+
 // Watchdog timer 
 TimerHandle_t watchdog_timer;
 bool is_stopped = true;
@@ -56,7 +59,7 @@ bool is_stopped = true;
 void watchdogCallback(TimerHandle_t xTimer) {
 	if (!is_stopped) {
 		// Send zero motor speed command and set stopped flag
-		xTaskNotify(xTaskGetHandle("LEDC_task"),0,eSetValueWithOverwrite);
+		xTaskNotify(xTaskGetHandle("control_task"),0,eSetValueWithOverwrite);
 		is_stopped = true;
 	}
 }
@@ -78,47 +81,6 @@ void write_int_to_usb(const uint8_t *data_ptr, int len, char *buffer) {
 	}
 }
 
-// Converts the body-velocity commands into  +/- wheel speeds through PWM duty cycle and polarity change for DRV8833
-void convertToWheels(const char * passedStr, uint8_t *dataV, uint8_t *dataW, uint8_t *dataR, uint8_t *dataL, uint8_t *wheelSigns)
-{
-	// set the wheel speeds using magnitudes in *dataV, *dataW and their signs in passedStr
-
-	uint8_t delta;
-	delta = 255-*dataW; // By design, dataW <= 255
-	if (delta > *dataV){
-		delta = *dataV; 
-	} 
-	// delta = min (v, 255-omega) is the above code is uncommented. LiDAR worked with uncommented, RS with commented
-	*wheelSigns=0;
-	if (passedStr[7] == '+'){
-		*dataR = *dataW+delta; // w + v, both positive, sum <= 255 by design
-		*wheelSigns = *wheelSigns | (1 << 1); 
-		if (*dataW > delta){ // except left wheel to be negative
-			*dataL = *dataW-delta; // -(w - v) = v-w
-		} else {
-			*dataL = delta-*dataW; // -(w - v) = v-w
-			*wheelSigns = *wheelSigns | 1; 
-		}
-	}
-	else{
-		*dataL = *dataW+delta; // w + v, both positive, sum <= 255 by design
-		*wheelSigns = *wheelSigns | 1; 
-		if (*dataW > delta){
-			*dataR = *dataW-delta; // -(w - v) = v-w
-		} else {
-			*dataR = delta-*dataW; // -(w - v) = v-w
-			*wheelSigns = *wheelSigns | (1 << 1); 
-		}
-	}
-	// Remove deadzone
-	/* *dataL = ((*dataL*6)/10)+100; */
-	/* *dataR = ((*dataR*6)/10)+100; */
-	// Note that there is also a deadzone in LEDC task
-	// EDay commented out next two lines:
-	//*dataL = (*dataL/2)+120;
-	//*dataR = (*dataR/2)+120;
-
-}
 // Separate initialization code to declutter main a little bit
 static void initUSB(usb_serial_jtag_driver_config_t* usb_serial_jtag_config)
 {
@@ -155,12 +117,6 @@ static void pmc_task(void *arg)
 	// Configure a temporary buffer for the incoming data
 	uint8_t data[64];
 
-	// Configure the master i2c bus
-	//i2c_master_bus_config_t i2c_bus_config;
-	//i2c_master_bus_handle_t bus_handle;
-	//i2c_device_config_t i2c_dev_cfg;
-	//i2c_master_dev_handle_t dev_handle;
-	//initI2C(&i2c_bus_config, &bus_handle, &i2c_dev_cfg ,&dev_handle);
 	// Config the RMT channel. 
 	rmt_channel_handle_t led_chan = NULL;
 	rmt_tx_channel_config_t tx_chan_config;
@@ -173,25 +129,12 @@ static void pmc_task(void *arg)
 	};
 	// Done with RMT config
 
-
-	//ESP_ERROR_CHECK(i2c_master_probe(bus_handle, 0x38, 1000));
-	//ESP_ERROR_CHECK(i2c_master_transmit(dev_handle, data_wr, len, 100));
-	//ESP_ERROR_CHECK(i2c_master_transmit_receive(dev_handle, data_wr, len, data_rd,4,-1));
-
 	int len = 2;
-	uint8_t left_wheel_speed = 170;
-	uint8_t right_wheel_speed = 170;
-	uint8_t *data_rw = malloc(len + 1); // right wheel
-	uint8_t *data_lw = malloc(len + 1); // left wheel
-	uint8_t *data_v = malloc(len); // right wheel
-	uint8_t *data_w = malloc(len); // left wheel
-	uint8_t *wheelSigns = malloc(len); // left wheel
-	uint32_t pmcTaskValue=0; // initialize a store of information
-							 // This 0x21 is outdated, from when we used I2C commands instead of a direct PWM
-	data_lw[0] = 0x21; // left wheel connects to motor 2 on AtomicMotionBase. 
-	data_rw[0] = 0x20; // right wheel connects to motor 1 on AtomicMotionBase
-	data_rw[1] = 0x00;
-	data_lw[1] = 0x00;
+	uint8_t *data_v = malloc(len); // forward velocity magnitude
+	uint8_t *data_w = malloc(len); // angular velocity magnitude
+	uint8_t *velSigns = malloc(len); // velocity signs
+	uint32_t pmcTaskValue=0; // initialize a store of information from ESPNOW
+							 //
 	// Initialize LED to zero
 	led_strip_pixels[0]=255; //G
 	led_strip_pixels[1]=0; //R
@@ -202,25 +145,13 @@ static void pmc_task(void *arg)
 	led_strip_pixels[0]=0;
 	led_strip_pixels[1]=255;
 	ESP_ERROR_CHECK(rmt_transmit(led_chan, led_encoder, led_strip_pixels, sizeof(led_strip_pixels), &tx_config));
-	// We have a state toggle
 	char buffer_t[8];
+	// We have a state toggle
 	bool motor_running = false;
 	while (1) {
+		// Read the buffer
 		int len = usb_serial_jtag_read_bytes(data, (BUF_SIZE - 1), 20 / portTICK_PERIOD_MS);
-		/* xTaskNotifyAndQuery(xTaskGetCurrentTaskHandle() ,0x00,eNoAction,&pmcTaskValue); */
-		/* led_strip_pixels[0] = (pmcTaskValue & 255); */
-		/* led_strip_pixels[1] = ((pmcTaskValue >> 8) & 255); */
-		/* led_strip_pixels[2] = ((pmcTaskValue >> 16) & 255); */
-		/* usb_serial_jtag_write_bytes("R: ", 3, 20 / portTICK_PERIOD_MS); */
-		/* write_int_to_usb(led_strip_pixels, 4,buffer_t); */
-		/* usb_serial_jtag_write_bytes(" ", 1, 20 / portTICK_PERIOD_MS); */
-		/* write_int_to_usb(led_strip_pixels+1, 4,buffer_t); */
-		/* usb_serial_jtag_write_bytes(" ", 1, 20 / portTICK_PERIOD_MS); */
-		/* write_int_to_usb(led_strip_pixels+2, 4,buffer_t); */
-		/* usb_serial_jtag_write_bytes("\n", 1, 20 / portTICK_PERIOD_MS); */
-		/* ESP_ERROR_CHECK(rmt_transmit(led_chan, led_encoder, led_strip_pixels, sizeof(led_strip_pixels), &tx_config)); */
-		/* ESP_ERROR_CHECK(rmt_tx_wait_all_done(led_chan, portMAX_DELAY)); */
-		if (len) {
+		if (len) { // if buffer has non-zero bytes, enter loop
 			data[len] = '\0'; // creates an end bit in the 1024-size buffer
 							  // check for stop command
 			if (*(data) == 'C' && len > 13 && *(data+1)== '.' && *(data+5)=='.' && *(data+9) == '.' && *(data+13) == '.' ){
@@ -243,6 +174,8 @@ static void pmc_task(void *arg)
 				usb_serial_jtag_write_bytes("\n", 1, 20 / portTICK_PERIOD_MS);
 			}
 			else if (*(data) == 'G' && len > 13 && *(data+1)== '.' && *(data+5)=='.' && *(data+9) == '.' && *(data+13) == '.' ){
+				// Debug mode, for direct command of wheel speeds
+				// Unclear where to put this with new control code 4/22/2026
 				// C.RRR.GGG.BBB
 				// 0123456789012
 				*(data+1) = '\0'; *(data+5) = '\0'; *(data+9) = '\0';*(data+13) = '\0';
@@ -251,8 +184,11 @@ static void pmc_task(void *arg)
 				myatoi((const char *)(data+5),led_strip_pixels+1);
 				myatoi((const char *)(data+9),led_strip_pixels+2);
 				usb_serial_jtag_write_bytes((const char *) (data), 1, 20 / portTICK_PERIOD_MS); // prints C
-				left_wheel_speed = led_strip_pixels[0];
-				right_wheel_speed = led_strip_pixels[1];
+				*data_v = led_strip_pixels[0];
+				*data_w = led_strip_pixels[1];
+				*velSigns = 0; // lowest bit is sign of omega, 2nd lowest is sign of v
+				if (*(data+2) == '+') *velSigns = *velSigns | (1 << 1); 
+				if (*(data+7) == '+') *velSigns = *velSigns | 1; 
 				char buffer[8];
 				// Print to console
 				usb_serial_jtag_write_bytes(" ", 1, 20 / portTICK_PERIOD_MS);
@@ -267,8 +203,9 @@ static void pmc_task(void *arg)
 				led_strip_pixels[0]=255; // Green
 				usb_serial_jtag_write_bytes((const char *) (data), 1, 20 / portTICK_PERIOD_MS);
 				usb_serial_jtag_write_bytes("\n", 1, 20 / portTICK_PERIOD_MS);
-				*(data_rw+1) = 0;
-				*(data_lw+1) = 0;
+				*(data_v) = 0;
+				*(data_w) = 0;
+				*velSigns = 1;
 				led_strip_pixels[1]=0;
 				led_strip_pixels[2]=0;
 				motor_running = false; // this step just uses messages to enable and disable motor control 
@@ -285,6 +222,9 @@ static void pmc_task(void *arg)
 				// convert strings containing |v|,|omega| into integers 
 				myatoi((const char *) (data+2),data_v); 
 				myatoi((const char *) (data+7),data_w);
+				*velSigns = 0; // lowest bit is sign of omega, 2nd lowest is sign of v
+				if (*(data+2) == '+') *velSigns = *velSigns | (1 << 1); 
+				if (*(data+7) == '+') *velSigns = *velSigns | 1; 
 
 				// Print received values to console
 				char buffer[8];  
@@ -293,21 +233,18 @@ static void pmc_task(void *arg)
 				write_int_to_usb(data_w, 4,buffer);
 				usb_serial_jtag_write_bytes(" ", 1, 20 / portTICK_PERIOD_MS);
 
-				// Now we convert v,w into phiR, phiL
-				//*(data_w)=0; // Disallow spinning
-				convertToWheels((const char *) data,data_v,data_w,data_rw+1,data_lw+1,wheelSigns);
 
 				// Print converted values to console
-				write_int_to_usb(data_rw+1, 4,buffer);
+				write_int_to_usb(data_v, 4,buffer);
 				usb_serial_jtag_write_bytes(" ", 1, 20 / portTICK_PERIOD_MS);
-				write_int_to_usb(data_lw+1, 4,buffer);
+				write_int_to_usb(data_w, 4,buffer);
 				usb_serial_jtag_write_bytes(" ", 1, 20 / portTICK_PERIOD_MS);
 				usb_serial_jtag_write_bytes(" w:", 3, 20 / portTICK_PERIOD_MS);
-				write_int_to_usb(wheelSigns, 8,buffer);
+				write_int_to_usb(velSigns, 8,buffer);
 				usb_serial_jtag_write_bytes("\n", 1, 20 / portTICK_PERIOD_MS);
 				// Set the LED values to be 
-				led_strip_pixels[1]=*(data_rw+1);
-				led_strip_pixels[2]=*(data_lw+1);
+				led_strip_pixels[1]=*(data_v);
+				led_strip_pixels[2]=*(data_w);
 
 			}
 
@@ -316,44 +253,38 @@ static void pmc_task(void *arg)
 			ESP_ERROR_CHECK(rmt_tx_wait_all_done(led_chan, portMAX_DELAY));
 			// Update the motors
 			// reset watchdog timer
-			xTaskNotify(xTaskGetHandle("LEDC_task"),(*(data_rw+1) << 8) | (*(data_lw+1) << 16) | *wheelSigns,eSetValueWithOverwrite);
+			// Send (v , w ,signs) as 8-8-8 chunk
 			xTimerReset(watchdog_timer, 0);
 			is_stopped = false;
 
 		} 
-			xTaskNotifyAndQuery(xTaskGetCurrentTaskHandle() ,0x00,eNoAction,&pmcTaskValue);
-			if (pmcTaskValue & 1 ) {
-				motor_running = true; // run under CA control
-			} else {
-				motor_running = false; // We'll give the command
-				if (( (pmcTaskValue >> 1) & 1) ) { // Right / Left ?
-					xTaskNotify(xTaskGetHandle("LEDC_task"),(left_wheel_speed << 8) | (right_wheel_speed << 16) | 1,eSetValueWithOverwrite);
-				} else if (( (pmcTaskValue >> 2) & 1) ) { // Forward
-					xTaskNotify(xTaskGetHandle("LEDC_task"),(left_wheel_speed << 8) | (right_wheel_speed << 16) | 3,eSetValueWithOverwrite);
-				} else if (( (pmcTaskValue >> 3) & 1) ) { // Right / Left?
-					xTaskNotify(xTaskGetHandle("LEDC_task"),(left_wheel_speed << 8) | (right_wheel_speed << 16) | 2,eSetValueWithOverwrite);
-				} else xTaskNotify(xTaskGetHandle("LEDC_task"), 0,eSetValueWithOverwrite);
-				xTimerReset(watchdog_timer, 0);
-				is_stopped = false;
+		xTaskNotifyAndQuery(xTaskGetCurrentTaskHandle() ,0x00,eNoAction,&pmcTaskValue);
+		if (pmcTaskValue & 1 ) {
+			motor_running = true; // run under CA control
+		} else {
+			motor_running = false; // We'll give the command
+			if (( (pmcTaskValue >> 1) & 1) ) { // Right / Left ?
+				*(data_v) = 0;
+				*(data_w) = 255;
+				*(velSigns) = 0;
+			} else if (( (pmcTaskValue >> 2) & 1) ) { // Forward
+				*(data_v) = 255;
+				*(data_w) = 0;
+				*(velSigns) = 1;
+			} else if (( (pmcTaskValue >> 3) & 1) ) { // Right / Left?
+				*(data_v) = 0;
+				*(data_w) = 255;
+				*(velSigns) = 1;
+			} else { // stop
+				*(data_v) = 0;
+				*(data_w) = 0;
+				*(velSigns) = 0;
 			}
-			// We set motor_running based on messages received from RPi 
-		// ESPNOW task is receiving messages and notifying this task
-		// The first four bits of pmcTaskValue correspond to which buttons are pressed 
-		// xTaskNotifyAndQuery(xTaskGetCurrentTaskHandle() ,0x00,eNoAction,&pmcTaskValue);
-		// if ((pmcTaskValue & 1) & motor_running) {
-		// 	xTaskNotify(xTaskGetHandle("LEDC_task"),(170 << 8) | (170 << 16) | 3,eSetValueWithOverwrite);
-		// 	xTimerReset(watchdog_timer, 0);
-		// } else if (( (pmcTaskValue >> 1) & 1) & motor_running) {
-		// 	xTaskNotify(xTaskGetHandle("LEDC_task"),(170 << 8) | (170 << 16) | 1,eSetValueWithOverwrite);
-		// 	xTimerReset(watchdog_timer, 0);
-		// } else if (( (pmcTaskValue >> 2) & 1) & motor_running) {
-		// 	xTaskNotify(xTaskGetHandle("LEDC_task"),(170 << 8) | (170 << 16) | 0,eSetValueWithOverwrite);
-		// 	xTimerReset(watchdog_timer, 0);
-		// } else if (( (pmcTaskValue >> 3) & 1) & motor_running) {
-		// 	xTaskNotify(xTaskGetHandle("LEDC_task"),(170 << 8) | (170 << 16) | 2,eSetValueWithOverwrite);
-		// 	xTimerReset(watchdog_timer, 0);
-		// } else xTaskNotify(xTaskGetHandle("LEDC_task"), 0,eSetValueWithOverwrite);
-		vTaskDelay(5);
+			xTimerReset(watchdog_timer, 0);
+			is_stopped = false;
+		}
+		xTaskNotify(xTaskGetHandle("CONTROL_task"),(*(data_w) << 8) | (*(data_v) << 16) | *velSigns,eSetValueWithOverwrite);
+		vTaskDelay(5 / portTICK_PERIOD_MS);
 	}
 }
 
@@ -373,7 +304,8 @@ void app_main(void)
 
 	print_mac_addr();
 
-	xTaskCreate(ledc_task, "LEDC_task", 3072, NULL, 1, NULL); // In reality, the PWM task
+	xTaskCreate(control_task, "CONTROL_task", 1024, NULL, 1, NULL);
+	xTaskCreate(ledc_task, "LEDC_task", 3076, NULL, 1, NULL); // In reality, the PWM task
 	xTaskNotify(xTaskGetHandle("LEDC_task"),0,eSetValueWithOverwrite); // Wheel speeds are zero
 	// Create one-shot timer (200ms). Seems reasonable that LEDC_task should exist first
 	watchdog_timer = xTimerCreate(
@@ -384,7 +316,7 @@ void app_main(void)
 			watchdogCallback      // Callback function
 			);
 	// Pi Motor Controller task. 
-	xTaskCreate(pmc_task, "PMC_task", 3072, NULL, 1, NULL);
+	xTaskCreate(pmc_task, "PMC_task", 3076, NULL, 1, NULL);
 	// Has to be after?: 
 	example_espnow_init();  // Still causes some memory leak
 
