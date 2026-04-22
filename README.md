@@ -37,3 +37,13 @@ Need to bring over the code for conversion from robot velocities to wheel =
 As of 07/01/24 uses the code in `wheeledrobot` to convert v,omega into wheel speeds. no deadzone
 During Fall 2025, reintroduce deadzone and also a watchdog timer to handle infrequent commands from main computer.
 
+Want to add joystick control 
+- Looking at the code in `esp/mobilerobot` and `esp/lidarbot/mobilerobot` 
+- You parse the message from the RasPi into two bytes values and wheel signs, and send it to the LEDC
+- You could just notify the ledc task directly from the esp now task, you don't really need `PMC task` if you don't plan to let RasPi control it
+
+- Completed this conversion to a joystick version 
+    - PMC task receives notification from ESPNOW task, and notifies LEDC task (PWM)
+    - The notification of LEDC task from within the message parsing scope is commented out
+    - To return to RPi control, set `motor_running` to always be false, and uncomment the LEDC task notification from within the communication parsing scope
+

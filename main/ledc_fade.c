@@ -64,7 +64,7 @@
 
 #define LEDC_TEST_CH_NUM       (4)
 #define LEDC_TEST_DUTY         (1000)
-#define LEDC_TEST_FADE_TIME    (50)
+#define LEDC_TEST_FADE_TIME    (100)
 
 
 #define GPIO_OUTPUT_IO_3     GPIO_NUM_39 // Sleep
@@ -229,6 +229,7 @@ void ledc_task(void)
 		// Expecting to have the 24-17th bit as left wheel, 16-9th as right wheel, and 8th-1st bit as mode or sign information
 		// You could make the code far more compact by changing the channel index using the sign bit
 		// You need a time out condition to stop motors
+		// Note that there is some deadzone compensation here
 		
 		gpio_set_level(GPIO_OUTPUT_IO_3, 1); // Sleep
 		// Set Bin 2

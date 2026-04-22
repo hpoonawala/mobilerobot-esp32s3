@@ -1,3 +1,9 @@
+/* 
+ * Code for companion controller (AtomS3lite, based on esp32s3) that converts velocity commands into wheel speed controllers
+ * Main task watches for data over USB and parses message, then sends computed duty cycles to a PWM task, also displays on WLED
+*/ 
+
+//
 //	 Used to be ledcontrol.c
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -17,7 +23,7 @@
 #include "led_strip_encoder.h"
 
 // My code
-/* #include "my_espnow.h" */
+#include "my_espnow.h"
 #include "ledc_fade.h"
 #include "pimotorcontrol.h"
 
@@ -107,8 +113,10 @@ void convertToWheels(const char * passedStr, uint8_t *dataV, uint8_t *dataW, uin
 	// Remove deadzone
 	/* *dataL = ((*dataL*6)/10)+100; */
 	/* *dataR = ((*dataR*6)/10)+100; */
-	*dataL = (*dataL/2)+120;
-	*dataR = (*dataR/2)+120;
+	// Note that there is also a deadzone in LEDC task
+	// EDay commented out next two lines:
+	//*dataL = (*dataL/2)+120;
+	//*dataR = (*dataR/2)+120;
 
 }
 // Separate initialization code to declutter main a little bit
@@ -171,6 +179,8 @@ static void pmc_task(void *arg)
 	//ESP_ERROR_CHECK(i2c_master_transmit_receive(dev_handle, data_wr, len, data_rd,4,-1));
 
 	int len = 2;
+	uint8_t left_wheel_speed = 170;
+	uint8_t right_wheel_speed = 170;
 	uint8_t *data_rw = malloc(len + 1); // right wheel
 	uint8_t *data_lw = malloc(len + 1); // left wheel
 	uint8_t *data_v = malloc(len); // right wheel
@@ -194,6 +204,7 @@ static void pmc_task(void *arg)
 	ESP_ERROR_CHECK(rmt_transmit(led_chan, led_encoder, led_strip_pixels, sizeof(led_strip_pixels), &tx_config));
 	// We have a state toggle
 	char buffer_t[8];
+	bool motor_running = false;
 	while (1) {
 		int len = usb_serial_jtag_read_bytes(data, (BUF_SIZE - 1), 20 / portTICK_PERIOD_MS);
 		/* xTaskNotifyAndQuery(xTaskGetCurrentTaskHandle() ,0x00,eNoAction,&pmcTaskValue); */
@@ -213,7 +224,7 @@ static void pmc_task(void *arg)
 			data[len] = '\0'; // creates an end bit in the 1024-size buffer
 							  // check for stop command
 			if (*(data) == 'C' && len > 13 && *(data+1)== '.' && *(data+5)=='.' && *(data+9) == '.' && *(data+13) == '.' ){
-				// C.RRR.GGG.BBB
+				// C.GGG.RRR.BBB
 				// 0123456789012
 				*(data+1) = '\0'; *(data+5) = '\0'; *(data+9) = '\0';*(data+13) = '\0';
 				// Note that myatoi was starting from second character for the prior case where there was a + or - in front of 3-digit number
@@ -221,8 +232,6 @@ static void pmc_task(void *arg)
 				myatoi((const char *)(data+5),led_strip_pixels+1);
 				myatoi((const char *)(data+9),led_strip_pixels+2);
 				usb_serial_jtag_write_bytes((const char *) (data), 1, 20 / portTICK_PERIOD_MS); // prints C
-				*(data_rw+1) = 0;
-				*(data_lw+1) = 0;
 				char buffer[8];
 				// Print to console
 				usb_serial_jtag_write_bytes(" ", 1, 20 / portTICK_PERIOD_MS);
@@ -233,24 +242,47 @@ static void pmc_task(void *arg)
 				write_int_to_usb(led_strip_pixels+2, 4,buffer);
 				usb_serial_jtag_write_bytes("\n", 1, 20 / portTICK_PERIOD_MS);
 			}
-			if (*(data) == 'S'){
-				led_strip_pixels[0]=255;
+			else if (*(data) == 'G' && len > 13 && *(data+1)== '.' && *(data+5)=='.' && *(data+9) == '.' && *(data+13) == '.' ){
+				// C.RRR.GGG.BBB
+				// 0123456789012
+				*(data+1) = '\0'; *(data+5) = '\0'; *(data+9) = '\0';*(data+13) = '\0';
+				// Note that myatoi was starting from second character for the prior case where there was a + or - in front of 3-digit number
+				myatoi((const char *)(data+1),led_strip_pixels);
+				myatoi((const char *)(data+5),led_strip_pixels+1);
+				myatoi((const char *)(data+9),led_strip_pixels+2);
+				usb_serial_jtag_write_bytes((const char *) (data), 1, 20 / portTICK_PERIOD_MS); // prints C
+				left_wheel_speed = led_strip_pixels[0];
+				right_wheel_speed = led_strip_pixels[1];
+				char buffer[8];
+				// Print to console
+				usb_serial_jtag_write_bytes(" ", 1, 20 / portTICK_PERIOD_MS);
+				write_int_to_usb(led_strip_pixels, 4,buffer);
+				usb_serial_jtag_write_bytes(" ", 1, 20 / portTICK_PERIOD_MS);
+				write_int_to_usb(led_strip_pixels+1, 4,buffer);
+				usb_serial_jtag_write_bytes(" ", 1, 20 / portTICK_PERIOD_MS);
+				write_int_to_usb(led_strip_pixels+2, 4,buffer);
+				usb_serial_jtag_write_bytes("\n", 1, 20 / portTICK_PERIOD_MS);
+			}
+			else if (*(data) == 'S' && !motor_running){ // Not that this !motor_running becomes blocking
+				led_strip_pixels[0]=255; // Green
 				usb_serial_jtag_write_bytes((const char *) (data), 1, 20 / portTICK_PERIOD_MS);
 				usb_serial_jtag_write_bytes("\n", 1, 20 / portTICK_PERIOD_MS);
 				*(data_rw+1) = 0;
 				*(data_lw+1) = 0;
 				led_strip_pixels[1]=0;
 				led_strip_pixels[2]=0;
+				motor_running = false; // this step just uses messages to enable and disable motor control 
 			}
 			// Check for differential speed command
-			if (*(data) == 'D' && len > 13 && *(data+1)== '.' && *(data+6)=='.' && *(data+11) == '.'){
+			else if (*(data) == 'D' && len > 13 && *(data+1)== '.' && *(data+6)=='.' && *(data+11) == '.' && motor_running){
+				//motor_running = true; // this step just uses messages to enable and disable motor control 
 				// define substrings using end character symbol: M.+SSS.+SSS.0 ('.' -> '\0')
 				led_strip_pixels[0]=0;
 				*(data+1) = '\0'; *(data+6) = '\0'; *(data+11) = '\0';
 
 				// print the substrings on the console
 				usb_serial_jtag_write_bytes((const char *) (data), 1, 20 / portTICK_PERIOD_MS); // 'D'
-																								// convert strings containing |v|,|omega| into integers 
+				// convert strings containing |v|,|omega| into integers 
 				myatoi((const char *) (data+2),data_v); 
 				myatoi((const char *) (data+7),data_w);
 
@@ -262,6 +294,7 @@ static void pmc_task(void *arg)
 				usb_serial_jtag_write_bytes(" ", 1, 20 / portTICK_PERIOD_MS);
 
 				// Now we convert v,w into phiR, phiL
+				//*(data_w)=0; // Disallow spinning
 				convertToWheels((const char *) data,data_v,data_w,data_rw+1,data_lw+1,wheelSigns);
 
 				// Print converted values to console
@@ -282,32 +315,77 @@ static void pmc_task(void *arg)
 			ESP_ERROR_CHECK(rmt_transmit(led_chan, led_encoder, led_strip_pixels, sizeof(led_strip_pixels), &tx_config));
 			ESP_ERROR_CHECK(rmt_tx_wait_all_done(led_chan, portMAX_DELAY));
 			// Update the motors
-			// NO MECHANISM RIGHT NOW
-			// Perhaps you want to notify the ledc fade task
-			xTaskNotify(xTaskGetHandle("LEDC_task"),(*(data_rw+1) << 8) | (*(data_lw+1) << 16) | *wheelSigns,eSetValueWithOverwrite);
 			// reset watchdog timer
+			xTaskNotify(xTaskGetHandle("LEDC_task"),(*(data_rw+1) << 8) | (*(data_lw+1) << 16) | *wheelSigns,eSetValueWithOverwrite);
 			xTimerReset(watchdog_timer, 0);
 			is_stopped = false;
 
-		}
-		/* xTaskNotifyAndQuery(xTaskGetCurrentTaskHandle() ,0x00,eNoAction,&pmcTaskValue); */
+		} 
+			xTaskNotifyAndQuery(xTaskGetCurrentTaskHandle() ,0x00,eNoAction,&pmcTaskValue);
+			if (pmcTaskValue & 1 ) {
+				motor_running = true; // run under CA control
+			} else {
+				motor_running = false; // We'll give the command
+				if (( (pmcTaskValue >> 1) & 1) ) { // Right / Left ?
+					xTaskNotify(xTaskGetHandle("LEDC_task"),(left_wheel_speed << 8) | (right_wheel_speed << 16) | 1,eSetValueWithOverwrite);
+				} else if (( (pmcTaskValue >> 2) & 1) ) { // Forward
+					xTaskNotify(xTaskGetHandle("LEDC_task"),(left_wheel_speed << 8) | (right_wheel_speed << 16) | 3,eSetValueWithOverwrite);
+				} else if (( (pmcTaskValue >> 3) & 1) ) { // Right / Left?
+					xTaskNotify(xTaskGetHandle("LEDC_task"),(left_wheel_speed << 8) | (right_wheel_speed << 16) | 2,eSetValueWithOverwrite);
+				} else xTaskNotify(xTaskGetHandle("LEDC_task"), 0,eSetValueWithOverwrite);
+				xTimerReset(watchdog_timer, 0);
+				is_stopped = false;
+			}
+			// We set motor_running based on messages received from RPi 
+		// ESPNOW task is receiving messages and notifying this task
+		// The first four bits of pmcTaskValue correspond to which buttons are pressed 
+		// xTaskNotifyAndQuery(xTaskGetCurrentTaskHandle() ,0x00,eNoAction,&pmcTaskValue);
+		// if ((pmcTaskValue & 1) & motor_running) {
+		// 	xTaskNotify(xTaskGetHandle("LEDC_task"),(170 << 8) | (170 << 16) | 3,eSetValueWithOverwrite);
+		// 	xTimerReset(watchdog_timer, 0);
+		// } else if (( (pmcTaskValue >> 1) & 1) & motor_running) {
+		// 	xTaskNotify(xTaskGetHandle("LEDC_task"),(170 << 8) | (170 << 16) | 1,eSetValueWithOverwrite);
+		// 	xTimerReset(watchdog_timer, 0);
+		// } else if (( (pmcTaskValue >> 2) & 1) & motor_running) {
+		// 	xTaskNotify(xTaskGetHandle("LEDC_task"),(170 << 8) | (170 << 16) | 0,eSetValueWithOverwrite);
+		// 	xTimerReset(watchdog_timer, 0);
+		// } else if (( (pmcTaskValue >> 3) & 1) & motor_running) {
+		// 	xTaskNotify(xTaskGetHandle("LEDC_task"),(170 << 8) | (170 << 16) | 2,eSetValueWithOverwrite);
+		// 	xTimerReset(watchdog_timer, 0);
+		// } else xTaskNotify(xTaskGetHandle("LEDC_task"), 0,eSetValueWithOverwrite);
+		vTaskDelay(5);
 	}
 }
 
 
 void app_main(void)
 {
+	// Set up ESPNOW 
+	esp_err_t ret = nvs_flash_init();
+	if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+		ESP_ERROR_CHECK( nvs_flash_erase() );
+		ret = nvs_flash_init();
+	}
+	ESP_ERROR_CHECK( ret );
+
+	set_custom_mac_addr();
+	wifi_init_sta();
+
+	print_mac_addr();
 
 	xTaskCreate(ledc_task, "LEDC_task", 3072, NULL, 1, NULL); // In reality, the PWM task
-	xTaskNotify(xTaskGetHandle("LEDC_task"),0,eSetValueWithOverwrite);
-	// Create one-shot timer (100ms). Seems reasonable that LEDC_task should exist first
+	xTaskNotify(xTaskGetHandle("LEDC_task"),0,eSetValueWithOverwrite); // Wheel speeds are zero
+	// Create one-shot timer (200ms). Seems reasonable that LEDC_task should exist first
 	watchdog_timer = xTimerCreate(
 			"Watchdog",           // Name
-			pdMS_TO_TICKS(200),   // Period (100ms)
+			pdMS_TO_TICKS(200),   // Period (200ms)
 			pdFALSE,              // Auto-reload (false = one-shot)
 			(void*)0,             // Timer ID
 			watchdogCallback      // Callback function
 			);
 	// Pi Motor Controller task. 
 	xTaskCreate(pmc_task, "PMC_task", 3072, NULL, 1, NULL);
+	// Has to be after?: 
+	example_espnow_init();  // Still causes some memory leak
+
 }
