@@ -9,7 +9,7 @@
 
 // I2C config
 #define I2C_TOOL_TIMEOUT_VALUE_MS (50)
-#define I2C_TASK_STACK_SIZE (4096)
+#define I2C_TASK_STACK_SIZE (8192)
 #define MPU6050_ADDR 0x68
 #define MPU6050_REG_ACCEL_XOUT_H 0x3B
 #define MPU6050_REG_PWR_MGMT_1 0x6B
@@ -24,7 +24,10 @@ static const char *TAG = "i2c-tools";
 static gpio_num_t i2c_gpio_sda = 2;
 static gpio_num_t i2c_gpio_scl = 1;
 static i2c_port_t i2c_port = I2C_NUM_0;
-
+static TaskHandle_t pmc_handle = NULL;
+void i2c_set_pmc_handle(TaskHandle_t handle) {
+    pmc_handle = handle;
+}
 // Complementary filter state
 typedef struct {
     float roll;   // Rotation around X-axis (degrees)
@@ -126,12 +129,13 @@ void myi2c_task(void *arg)
     vTaskDelay(100 / portTICK_PERIOD_MS);
     
     uint8_t reg_addr = MPU6050_REG_ACCEL_XOUT_H;
-    TickType_t last_wake_time = xTaskGetTickCount();
     const TickType_t sample_period = pdMS_TO_TICKS(10);  // 100 Hz sampling
     float dt = 0.01f;  // 10ms in seconds
-	TickType_t now = xTaskGetTickCount();
-    
+    int log_counter = 0;
+    TickType_t last_wake_time = xTaskGetTickCount();
     while(1) {
+		/* ESP_LOGI(TAG, "HWM: %u bytes free", uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t)); */
+        vTaskDelayUntil(&last_wake_time, sample_period);
         // Read 14 bytes starting from ACCEL_XOUT_H register
         ret = i2c_master_transmit_receive(dev_handle, 
                                           &reg_addr, 1,
@@ -156,14 +160,11 @@ void myi2c_task(void *arg)
             float gy = gyro_y_raw / GYRO_SCALE;
             float gz = gyro_z_raw / GYRO_SCALE;
             float temperature = (temp_raw / 340.0f) + 36.53f;
-			now = xTaskGetTickCount();
-			dt = (now - last_wake_time) / (float)configTICK_RATE_HZ;
-			last_wake_time = now;
+			//
             // Update orientation estimate
             update_orientation(ax, ay, az, gx, gy, gz, dt);
             
             // Log orientation every 10 samples (1 Hz)
-            static int log_counter = 0;
             if (++log_counter >= 10) {
                 ESP_LOGI(TAG, "Orientation: Roll=%.1f° Pitch=%.1f° Yaw=%.1f° | Temp=%.1f°C", 
                          orientation.roll, orientation.pitch, orientation.yaw, temperature);
@@ -171,19 +172,17 @@ void myi2c_task(void *arg)
             }
             
             // Send notification to PMC task (optional - include orientation data)
-            TaskHandle_t pmc_task = xTaskGetHandle("PMC_task");
-            if (pmc_task != NULL) {
+            if (pmc_handle != NULL) {
                 // Pack roll and pitch into notification (scaled to fit in uint32_t)
-                int16_t roll_int = (int16_t)(orientation.roll * 10);
+                int16_t yaw_int = (int16_t)(orientation.yaw * 10);
                 int16_t pitch_int = (int16_t)(orientation.pitch * 10);
-                uint32_t notify_value = (roll_int & 0xFFFF) | ((pitch_int & 0xFFFF) << 16);
-                xTaskNotify(pmc_task, notify_value, eSetValueWithOverwrite);
+                uint32_t notify_value = ((yaw_int & 0xFFFF) << 16) | (pitch_int & 0xFFFF) ;
+                xTaskNotify(pmc_handle, notify_value, eSetValueWithOverwrite);
             }
         } else {
             ESP_LOGE(TAG, "Failed to read from MPU6050: %s", esp_err_to_name(ret));
         }
         
-        vTaskDelayUntil(&last_wake_time, sample_period);
     }
 }
 

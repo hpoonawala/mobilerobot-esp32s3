@@ -47,3 +47,4 @@ Want to add joystick control
     - The notification of LEDC task from within the message parsing scope is commented out
     - To return to RPi control, set `motor_running` to always be false, and uncomment the LEDC task notification from within the communication parsing scope
 
+- Manually changed the Flash size to 8MB and specified a partitions file

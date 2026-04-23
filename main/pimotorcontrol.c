@@ -26,7 +26,7 @@
 #include "my_espnow.h"
 #include "ledc_fade.h"
 #include "control_loop.h"
-#include "pimotorcontrol.h"
+#include "myi2c.h"
 
 #define PMC_TASK_STACK_SIZE (4096)
 #define CONTROL_TASK_STACK_SIZE (1024)
@@ -331,6 +331,7 @@ void app_main(void)
 	// Has to be after?: 
 	espnow_set_pmc_handle(pmc_handle);
 	example_espnow_init();  
+	i2c_set_pmc_handle(pmc_handle);
 	initI2Ctask();
 	ESP_LOGI("MEM", "Free heap after I2C with IMU: %lu", esp_get_free_heap_size());
 

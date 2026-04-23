@@ -72,8 +72,7 @@
 #define DEADZONE_MAX    (750)
 
 #define GPIO_OUTPUT_IO_3     GPIO_NUM_39 // Sleep
-#define GPIO_OUTPUT_IO_6     GPIO_NUM_35 // LED
-#define GPIO_OUTPUT_PIN_SEL   ((1ULL<<GPIO_OUTPUT_IO_3) | (1ULL << GPIO_OUTPUT_IO_6))
+#define GPIO_OUTPUT_PIN_SEL   (1ULL<<GPIO_OUTPUT_IO_3) 
 /*
  * This callback function will be called when fade operation has ended
  * Use callback only if you are aware it is being called inside an ISR
@@ -107,13 +106,6 @@ void ledc_task(void)
 	gpio_config(&io_conf);
 	gpio_set_level(GPIO_OUTPUT_IO_3, 0); // Sleep
 										 //
-
-	for(int jj=0;jj<3;jj++){																	//
-		gpio_set_level(GPIO_NUM_35, 1); // Bin1
-		vTaskDelay(300 / portTICK_PERIOD_MS);
-		gpio_set_level(GPIO_NUM_35, 0); // Bin1
-		vTaskDelay(300 / portTICK_PERIOD_MS);
-	}
     /*
      * Prepare and set configuration of timers
      * that will be used by LED Controller
