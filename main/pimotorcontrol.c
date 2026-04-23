@@ -59,7 +59,7 @@ bool is_stopped = true;
 void watchdogCallback(TimerHandle_t xTimer) {
 	if (!is_stopped) {
 		// Send zero motor speed command and set stopped flag
-		xTaskNotify(xTaskGetHandle("control_task"),0,eSetValueWithOverwrite);
+		xTaskNotify(xTaskGetHandle("CONTROL_task"),0,eSetValueWithOverwrite);
 		is_stopped = true;
 	}
 }
@@ -114,6 +114,7 @@ static void pmc_task(void *arg)
 	usb_serial_jtag_driver_config_t usb_serial_jtag_config;
 	initUSB(&usb_serial_jtag_config);
 
+    ESP_LOGI("PMC", "Stack HWM after child spawn: %u bytes free", uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t));
 	// Configure a temporary buffer for the incoming data
 	uint8_t data[64];
 
@@ -261,7 +262,7 @@ static void pmc_task(void *arg)
 		} 
 		xTaskNotifyAndQuery(xTaskGetCurrentTaskHandle() ,0x00,eNoAction,&pmcTaskValue);
 		if (pmcTaskValue & 1 ) {
-			motor_running = false; // run under CA control
+			motor_running = true; // run under CA control
 		} else {
 				led_strip_pixels[0]=0;
 				led_strip_pixels[1]=0;
@@ -313,8 +314,7 @@ void app_main(void)
 	wifi_init_sta();
 
 	print_mac_addr();
-
-	xTaskCreate(control_task, "CONTROL_task", 1024, NULL, 1, NULL);
+	xTaskCreate(control_task, "CONTROL_task", 2048, NULL, 1, NULL);
 	xTaskCreate(ledc_task, "LEDC_task", 3076, NULL, 1, NULL); // In reality, the PWM task
 	xTaskNotify(xTaskGetHandle("LEDC_task"),0,eSetValueWithOverwrite); // Wheel speeds are zero
 	// Create one-shot timer (200ms). Seems reasonable that LEDC_task should exist first
@@ -326,8 +326,12 @@ void app_main(void)
 			watchdogCallback      // Callback function
 			);
 	// Pi Motor Controller task. 
-	xTaskCreate(pmc_task, "PMC_task", 3076, NULL, 1, NULL);
+	TaskHandle_t pmc_handle;
+	xTaskCreate(pmc_task, "PMC_task", 6144, NULL, 1, &pmc_handle);
 	// Has to be after?: 
-	example_espnow_init();  // Still causes some memory leak
+	espnow_set_pmc_handle(pmc_handle);
+	example_espnow_init();  
+	initI2Ctask();
+	ESP_LOGI("MEM", "Free heap after I2C with IMU: %lu", esp_get_free_heap_size());
 
 }
