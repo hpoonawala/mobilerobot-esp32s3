@@ -187,8 +187,12 @@ static void pmc_task(void *arg)
 					// use imu_snapshot.yaw, imu_snapshot.yaw_rate etc.
 					char buffer[8];
 					ulTaskNotifyValueClear(pmc_handle, IMU_READY_BIT);
-				led_strip_pixels[0]= imu_snapshot.yaw >= 0? (uint8_t) imu_snapshot.yaw : 0;
-				led_strip_pixels[1]= imu_snapshot.yaw < 0? (uint8_t) (-imu_snapshot.yaw) : 0;
+					// Send yaw as formatted string to Pi
+					char imu_buf[32];
+					int n = snprintf(imu_buf, sizeof(imu_buf), "I.%+08.2f\n", imu_snapshot.yaw);
+					usb_serial_jtag_write_bytes(imu_buf, n, 20 / portTICK_PERIOD_MS);
+					led_strip_pixels[0]= imu_snapshot.yaw >= 0? (uint8_t) imu_snapshot.yaw : 0;
+					led_strip_pixels[1]= imu_snapshot.yaw < 0? (uint8_t) (-imu_snapshot.yaw) : 0;
 
 				}
 			}
@@ -305,6 +309,19 @@ static void pmc_task(void *arg)
 				*(data_w) = 0;
 				*(velSigns) = 0;
 			}
+			if (pmcTaskValue & IMU_READY_BIT) {
+				imu_data_t imu_snapshot;
+				xSemaphoreTake(imu_mutex, portMAX_DELAY);
+				memcpy(&imu_snapshot, &latest_imu, sizeof(imu_data_t));
+				xSemaphoreGive(imu_mutex);
+
+				// use imu_snapshot.yaw, imu_snapshot.yaw_rate etc.
+				ulTaskNotifyValueClear(pmc_handle, IMU_READY_BIT);
+				// Send yaw as formatted string to Pi
+				led_strip_pixels[0]= imu_snapshot.yaw >= 0? (uint8_t) imu_snapshot.yaw : 0;
+				led_strip_pixels[1]= imu_snapshot.yaw < 0? (uint8_t) (-imu_snapshot.yaw) : 0;
+
+			}
 			xTimerReset(watchdog_timer, 0);
 			is_stopped = false;
 			// Update LEDs 
@@ -334,7 +351,7 @@ void app_main(void)
 	xTaskCreate(control_task, "CONTROL_task", 2048, NULL, 1, NULL);
 	xTaskCreate(ledc_task, "LEDC_task", 3076, NULL, 1, NULL); // In reality, the PWM task
 	xTaskNotify(xTaskGetHandle("LEDC_task"),0,eSetValueWithOverwrite); // Wheel speeds are zero
-	// Create one-shot timer (200ms). Seems reasonable that LEDC_task should exist first
+																	   // Create one-shot timer (200ms). Seems reasonable that LEDC_task should exist first
 	watchdog_timer = xTimerCreate(
 			"Watchdog",           // Name
 			pdMS_TO_TICKS(200),   // Period (200ms)
