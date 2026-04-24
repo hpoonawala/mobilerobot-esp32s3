@@ -13,6 +13,7 @@
 #include "esp_check.h"
 #include "nvs_flash.h"
 #include "esp_now.h"
+#include <string.h>
 
 // Communication
 #include "driver/usb_serial_jtag.h"
@@ -174,6 +175,22 @@ static void pmc_task(void *arg)
 				usb_serial_jtag_write_bytes(" ", 1, 20 / portTICK_PERIOD_MS);
 				write_int_to_usb(led_strip_pixels+2, 4,buffer);
 				usb_serial_jtag_write_bytes("\n", 1, 20 / portTICK_PERIOD_MS);
+			}
+			else if (*(data) == 'I' && len > 2 && *(data+1)== '.' ){
+				// In pmc_task loop, when you check pmcTaskValue:
+				if (pmcTaskValue & IMU_READY_BIT) {
+					imu_data_t imu_snapshot;
+					xSemaphoreTake(imu_mutex, portMAX_DELAY);
+					memcpy(&imu_snapshot, &latest_imu, sizeof(imu_data_t));
+					xSemaphoreGive(imu_mutex);
+
+					// use imu_snapshot.yaw, imu_snapshot.yaw_rate etc.
+					char buffer[8];
+					ulTaskNotifyValueClear(pmc_handle, IMU_READY_BIT);
+				led_strip_pixels[0]= imu_snapshot.yaw >= 0? (uint8_t) imu_snapshot.yaw : 0;
+				led_strip_pixels[1]= imu_snapshot.yaw < 0? (uint8_t) (-imu_snapshot.yaw) : 0;
+
+				}
 			}
 			else if (*(data) == 'G' && len > 13 && *(data+1)== '.' && *(data+5)=='.' && *(data+9) == '.' && *(data+13) == '.' ){
 				// Debug mode, for direct command of wheel speeds

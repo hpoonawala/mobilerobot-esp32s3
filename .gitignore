@@ -7,7 +7,6 @@ main/build/
 main/gpio.c
 main/gpio.h
 main/myi2c.c
-main/myi2c.h
 main/old_pimotorcontrol.c
 main/pimotorcontrol.pdf
 main/test_convert.c
