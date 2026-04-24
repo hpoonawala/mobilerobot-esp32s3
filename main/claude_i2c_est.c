@@ -2,6 +2,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "myi2c.h"
+#include "imu_data.h"
 #include "esp_log.h"
 #include "esp_err.h"
 #include "esp_check.h"

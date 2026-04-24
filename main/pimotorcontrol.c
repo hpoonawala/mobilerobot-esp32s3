@@ -28,6 +28,7 @@
 #include "ledc_fade.h"
 #include "control_loop.h"
 #include "myi2c.h"
+#include "imu_data.h"
 
 #define PMC_TASK_STACK_SIZE (4096)
 #define CONTROL_TASK_STACK_SIZE (1024)
@@ -191,8 +192,9 @@ static void pmc_task(void *arg)
 					char imu_buf[32];
 					int n = snprintf(imu_buf, sizeof(imu_buf), "I.%+08.2f\n", imu_snapshot.yaw);
 					usb_serial_jtag_write_bytes(imu_buf, n, 20 / portTICK_PERIOD_MS);
-					led_strip_pixels[0]= imu_snapshot.yaw >= 0? (uint8_t) imu_snapshot.yaw : 0;
-					led_strip_pixels[1]= imu_snapshot.yaw < 0? (uint8_t) (-imu_snapshot.yaw) : 0;
+					// Send gz for debugging integrator control
+					/* n = snprintf(imu_buf, sizeof(imu_buf), "I.%+08.2f\n", imu_snapshot.yaw_rate); */
+					/* usb_serial_jtag_write_bytes(imu_buf, n, 20 / portTICK_PERIOD_MS); */
 
 				}
 			}
@@ -291,7 +293,7 @@ static void pmc_task(void *arg)
 			motor_running = false; // We'll give the command
 			if (( (pmcTaskValue >> 1) & 1) ) { // Right / Left ?
 				led_strip_pixels[0]=255;
-				*(data_v) = 00;
+				*(data_v) = 0;
 				*(data_w) = 200;
 				*(velSigns) = 0;
 			} else if (( (pmcTaskValue >> 2) & 1) ) { // Forward
@@ -318,8 +320,8 @@ static void pmc_task(void *arg)
 				// use imu_snapshot.yaw, imu_snapshot.yaw_rate etc.
 				ulTaskNotifyValueClear(pmc_handle, IMU_READY_BIT);
 				// Send yaw as formatted string to Pi
-				led_strip_pixels[0]= imu_snapshot.yaw >= 0? (uint8_t) imu_snapshot.yaw : 0;
-				led_strip_pixels[1]= imu_snapshot.yaw < 0? (uint8_t) (-imu_snapshot.yaw) : 0;
+				/* led_strip_pixels[0]= imu_snapshot.yaw >= 0? (uint8_t) imu_snapshot.yaw : 0; */
+				/* led_strip_pixels[1]= imu_snapshot.yaw < 0? (uint8_t) (-imu_snapshot.yaw) : 0; */
 
 			}
 			xTimerReset(watchdog_timer, 0);
